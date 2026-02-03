@@ -722,12 +722,19 @@ export default function (app: Express, ctx: AppContext) {
       const userDid = (req as any).userDid as string
       const convoId = req.params.id
       const { message } = req.body as {
-        message: { text: string; facets?: RichtextFacet[] }
+        message: { text: string; facets?: RichtextFacet[]; embed?: any }
       }
 
-      if (!message || typeof message.text !== 'string' || message.text.trim() === '') {
-        return res.status(400).json({ error: 'Message text is required' })
+      // Allow empty text if there's an embed (e.g., voice message)
+      const hasText = message && typeof message.text === 'string' && message.text.trim() !== ''
+      const hasEmbed = message && message.embed && message.embed.$type
+
+      if (!message || (!hasText && !hasEmbed)) {
+        console.log('[Chat] Message rejected - no text or embed:', { hasText, hasEmbed, message })
+        return res.status(400).json({ error: 'Message text or embed is required' })
       }
+
+      console.log('[Chat] Sending message:', { convoId, userDid, hasText, hasEmbed, embedType: message.embed?.$type })
 
       // Verify user is a member and accepted
       const membership = await ctx.db
@@ -756,9 +763,9 @@ export default function (app: Express, ctx: AppContext) {
           id: messageId,
           conversationId: convoId,
           senderDid: userDid,
-          text: message.text,
+          text: message.text || '',
           facets: message.facets ? JSON.stringify(message.facets) : null,
-          embed: null,
+          embed: message.embed ? JSON.stringify(message.embed) : null,
           rev,
           createdAt: timestamp,
           deletedAt: null,
@@ -777,8 +784,9 @@ export default function (app: Express, ctx: AppContext) {
         $type: 'chat.bsky.convo.defs#messageView',
         id: messageId,
         rev,
-        text: message.text,
+        text: message.text || '',
         facets: message.facets,
+        embed: message.embed,
         sender: { did: userDid },
         sentAt: timestamp,
       }
