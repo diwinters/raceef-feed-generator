@@ -176,15 +176,40 @@ export default function (app: Express, ctx: AppContext) {
 
   // Serve voice message files
   app.use('/media/voice', (req, res, next) => {
+    // Add CORS headers for audio playback
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type')
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges')
+    
+    // Handle OPTIONS preflight
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end()
+    }
+    
+    const filename = req.path.slice(1) // Remove leading slash
+    console.log('[Media] Serving voice file:', filename)
+    
+    // Determine content type based on extension
+    let contentType = 'audio/mp4'
+    if (filename.endsWith('.aac')) {
+      contentType = 'audio/aac'
+    } else if (filename.endsWith('.m4a')) {
+      contentType = 'audio/x-m4a'
+    }
+    
     const options = {
       root: VOICE_DIR,
       headers: {
         'Cache-Control': 'public, max-age=31536000', // 1 year cache
-        'Content-Type': 'audio/mp4',
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
       },
     }
-    res.sendFile(req.path, options, (err) => {
+    
+    res.sendFile(filename, options, (err) => {
       if (err) {
+        console.error('[Media] Voice file error:', err)
         res.status(404).json({ error: 'Voice message not found' })
       }
     })
