@@ -13,12 +13,16 @@ const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL || '' // Empty means use relat
 // Ensure upload directories exist
 const STORIES_DIR = path.join(UPLOAD_DIR, 'stories')
 const THUMBNAILS_DIR = path.join(UPLOAD_DIR, 'thumbnails')
+const VOICE_DIR = path.join(UPLOAD_DIR, 'voice')
 
 if (!fs.existsSync(STORIES_DIR)) {
   fs.mkdirSync(STORIES_DIR, { recursive: true })
 }
 if (!fs.existsSync(THUMBNAILS_DIR)) {
   fs.mkdirSync(THUMBNAILS_DIR, { recursive: true })
+}
+if (!fs.existsSync(VOICE_DIR)) {
+  fs.mkdirSync(VOICE_DIR, { recursive: true })
 }
 
 // Configure multer for file uploads
@@ -49,6 +53,12 @@ const upload = multer({
       'video/mp4',
       'video/quicktime',
       'video/x-m4v',
+      // Voice message types
+      'audio/aac',
+      'audio/mp4',
+      'audio/m4a',
+      'audio/x-m4a',
+      'audio/mpeg',
     ]
     if (allowedMimes.includes(file.mimetype)) {
       cb(null, true)
@@ -162,6 +172,93 @@ export default function (app: Express, ctx: AppContext) {
         res.status(404).json({ error: 'Thumbnail not found' })
       }
     })
+  })
+
+  // Serve voice message files
+  app.use('/media/voice', (req, res, next) => {
+    const options = {
+      root: VOICE_DIR,
+      headers: {
+        'Cache-Control': 'public, max-age=31536000', // 1 year cache
+        'Content-Type': 'audio/mp4',
+      },
+    }
+    res.sendFile(req.path, options, (err) => {
+      if (err) {
+        res.status(404).json({ error: 'Voice message not found' })
+      }
+    })
+  })
+
+  // Upload voice message
+  app.post(
+    '/chat/media/voice',
+    uploadRateLimitMiddleware,
+    upload.single('audio') as any,
+    async (req: Request, res: Response) => {
+      try {
+        const file = (req as any).file as Express.Multer.File | undefined
+        const userDid = req.headers['x-user-did'] as string
+        const { duration, waveform } = req.body
+
+        if (!file) {
+          return res.status(400).json({ error: 'No audio file uploaded' })
+        }
+
+        if (!userDid) {
+          // Clean up the uploaded file
+          fs.unlinkSync(file.path)
+          return res.status(400).json({ error: 'Missing user DID' })
+        }
+
+        // Move file to voice directory with unique name
+        const voiceKey = `${uuidv4()}.m4a`
+        const voicePath = path.join(VOICE_DIR, voiceKey)
+        fs.renameSync(file.path, voicePath)
+
+        // Get file size
+        const stats = fs.statSync(voicePath)
+
+        console.log(`[Media] Voice message uploaded: ${voiceKey} by ${userDid}`)
+
+        res.json({
+          key: voiceKey,
+          size: stats.size,
+        })
+      } catch (error) {
+        console.error('[Media] Voice upload error:', error)
+        // Clean up file if it was uploaded
+        const uploadedFile = (req as any).file as Express.Multer.File | undefined
+        if (uploadedFile) {
+          try {
+            fs.unlinkSync(uploadedFile.path)
+          } catch {}
+        }
+        return res.status(500).json({ error: 'Voice upload failed' })
+      }
+    }
+  )
+
+  // Get voice message URL
+  app.get('/chat/media/voice/:key', async (req: Request, res: Response) => {
+    try {
+      const { key } = req.params
+      const voicePath = path.join(VOICE_DIR, key)
+
+      if (!fs.existsSync(voicePath)) {
+        return res.status(404).json({ error: 'Voice message not found' })
+      }
+
+      // Return the URL for the voice message
+      const url = MEDIA_BASE_URL
+        ? `${MEDIA_BASE_URL}/voice/${key}`
+        : `/media/voice/${key}`
+
+      res.json({ url })
+    } catch (error) {
+      console.error('[Media] Voice URL error:', error)
+      return res.status(500).json({ error: 'Failed to get voice URL' })
+    }
   })
 
   // Upload story media
