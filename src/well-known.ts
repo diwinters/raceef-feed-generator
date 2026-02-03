@@ -17,6 +17,11 @@ const makeRouter = (ctx: AppContext) => {
           type: 'BskyFeedGenerator',
           serviceEndpoint: `https://${ctx.cfg.hostname}`,
         },
+        {
+          id: '#raceef_chat',
+          type: 'RaceefChat',
+          serviceEndpoint: `https://${ctx.cfg.hostname}`,
+        },
       ],
     })
   })

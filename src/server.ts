@@ -5,6 +5,10 @@ import { DidResolver, MemoryCache } from '@atproto/identity'
 import { createServer } from './lexicon'
 import feedGeneration from './methods/feed-generation'
 import describeGenerator from './methods/describe-generator'
+import getReactions from './methods/get-reactions'
+import stories from './methods/stories'
+import media from './methods/media'
+import chat from './methods/chat'
 import { createDb, Database, migrateToLatest } from './db'
 import { FirehoseSubscription } from './subscription'
 import { AppContext, Config } from './config'
@@ -31,6 +35,16 @@ export class FeedGenerator {
 
   static create(cfg: Config) {
     const app = express()
+    // Middleware to bypass ngrok browser warning
+    app.use((req, res, next) => {
+      // Check if response is already sent before setting headers
+      if (!res.headersSent) {
+        res.setHeader("ngrok-skip-browser-warning", "true")
+      }
+      next()
+    })
+    // Parse JSON bodies for POST requests
+    app.use(express.json())
     const db = createDb(cfg.sqliteLocation)
     const firehose = new FirehoseSubscription(db, cfg.subscriptionEndpoint)
 
@@ -57,6 +71,10 @@ export class FeedGenerator {
     describeGenerator(server, ctx)
     app.use(server.xrpc.router)
     app.use(wellKnown(ctx))
+    getReactions(app, ctx)
+    stories(app, ctx)
+    media(app, ctx)
+    chat(app, ctx)
 
     return new FeedGenerator(app, db, firehose, cfg)
   }

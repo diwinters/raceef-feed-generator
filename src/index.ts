@@ -1,11 +1,25 @@
 import dotenv from 'dotenv'
 import FeedGenerator from './server'
+import { log, logError } from './logger'
 
 const run = async () => {
   dotenv.config()
+  
+  log('Starting Raceef Feed Generator...')
+  log('Environment: ' + JSON.stringify({
+    FEEDGEN_PORT: process.env.FEEDGEN_PORT,
+    FEEDGEN_LISTENHOST: process.env.FEEDGEN_LISTENHOST,
+    FEEDGEN_HOSTNAME: process.env.FEEDGEN_HOSTNAME,
+    FEEDGEN_PUBLISHER_DID: process.env.FEEDGEN_PUBLISHER_DID,
+  }))
+  
   const hostname = maybeStr(process.env.FEEDGEN_HOSTNAME) ?? 'example.com'
   const serviceDid =
     maybeStr(process.env.FEEDGEN_SERVICE_DID) ?? `did:web:${hostname}`
+  
+  log('Hostname: ' + hostname)
+  log('Service DID: ' + serviceDid)
+  
   const server = FeedGenerator.create({
     port: maybeInt(process.env.FEEDGEN_PORT) ?? 3000,
     listenhost: maybeStr(process.env.FEEDGEN_LISTENHOST) ?? 'localhost',
@@ -20,10 +34,14 @@ const run = async () => {
     hostname,
     serviceDid,
   })
-  await server.start()
-  console.log(
-    `🤖 running feed generator at http://${server.cfg.listenhost}:${server.cfg.port}`,
-  )
+  
+  try {
+    await server.start()
+    log(`🤖 Feed generator started successfully at http://${server.cfg.listenhost}:${server.cfg.port}`)
+  } catch (error) {
+    logError('Failed to start server', error)
+    process.exit(1)
+  }
 }
 
 const maybeStr = (val?: string) => {
@@ -37,5 +55,20 @@ const maybeInt = (val?: string) => {
   if (isNaN(int)) return undefined
   return int
 }
+
+process.on('uncaughtException', (error) => {
+  logError('Uncaught Exception', error)
+  // Don't exit on ERR_HTTP_HEADERS_SENT - it's not fatal
+  if (error && (error as NodeJS.ErrnoException).code === 'ERR_HTTP_HEADERS_SENT') {
+    log('Ignoring non-fatal headers-sent error')
+    return
+  }
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled Rejection', reason)
+  // Don't exit immediately, just log it
+})
 
 run()
