@@ -100,6 +100,7 @@ async function buildMessageView(ctx: AppContext, message: any): Promise<MessageV
     rev: message.rev,
     text: message.text,
     facets: message.facets ? JSON.parse(message.facets) : undefined,
+    embed: message.embed ? JSON.parse(message.embed) : undefined,
     sender: { did: message.senderDid },
     sentAt: message.createdAt,
     reactions,
@@ -305,6 +306,7 @@ export default function (app: Express, ctx: AppContext) {
                 rev: lastMessageRow.rev,
                 text: lastMessageRow.text,
                 facets: lastMessageRow.facets ? JSON.parse(lastMessageRow.facets) : undefined,
+                embed: lastMessageRow.embed ? JSON.parse(lastMessageRow.embed) : undefined,
                 sender: { did: lastMessageRow.senderDid },
                 sentAt: lastMessageRow.createdAt,
               }
@@ -467,6 +469,7 @@ export default function (app: Express, ctx: AppContext) {
             rev: lastMessageRow.rev,
             text: lastMessageRow.text,
             facets: lastMessageRow.facets ? JSON.parse(lastMessageRow.facets) : undefined,
+            embed: lastMessageRow.embed ? JSON.parse(lastMessageRow.embed) : undefined,
             sender: { did: lastMessageRow.senderDid },
             sentAt: lastMessageRow.createdAt,
           }
@@ -674,6 +677,7 @@ export default function (app: Express, ctx: AppContext) {
           rev: m.rev,
           text: m.text,
           facets: m.facets ? JSON.parse(m.facets) : undefined,
+          embed: m.embed ? JSON.parse(m.embed) : undefined,
           sender: { did: m.senderDid },
           sentAt: m.createdAt,
           reactions,
