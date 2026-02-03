@@ -364,3 +364,38 @@ migrations['008'] = {
     await db.schema.dropTable('message_status').execute()
   },
 }
+
+// Migration 009: Voice message played tracking
+migrations['009'] = {
+  async up(db: Kysely<unknown>) {
+    // Voice played tracking table
+    await db.schema
+      .createTable('voice_played')
+      .addColumn('messageId', 'varchar', (col) => col.notNull())
+      .addColumn('listenerDid', 'varchar', (col) => col.notNull())
+      .addColumn('playedAt', 'varchar', (col) => col.notNull())
+      .execute()
+    // Primary key on (messageId, listenerDid)
+    await db.schema
+      .createIndex('voice_played_pk')
+      .on('voice_played')
+      .columns(['messageId', 'listenerDid'])
+      .unique()
+      .execute()
+    // Index for message lookups
+    await db.schema
+      .createIndex('voice_played_msg_idx')
+      .on('voice_played')
+      .column('messageId')
+      .execute()
+    // Index for user lookups
+    await db.schema
+      .createIndex('voice_played_listener_idx')
+      .on('voice_played')
+      .column('listenerDid')
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('voice_played').execute()
+  },
+}

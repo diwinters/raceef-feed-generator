@@ -15,6 +15,8 @@ export type DatabaseSchema = {
   message_event: MessageEvent
   // Message status tracking
   message_status: MessageStatus
+  // Voice message played tracking
+  voice_played: VoicePlayed
   // User presence tracking
   user_presence: UserPresence
   // Chat privacy settings
@@ -178,4 +180,15 @@ export type ChatPrivacy = {
   showOnlineStatus: number    // 0 = disabled, 1 = enabled
   showLastSeen: number        // 0 = disabled, 1 = enabled
   updatedAt: string
+}
+
+// ============================================
+// VOICE MESSAGE PLAYED TRACKING
+// ============================================
+
+// Track which voice messages have been played by recipients
+export type VoicePlayed = {
+  messageId: string     // FK to message.id (voice message)
+  listenerDid: string   // Who played the voice message
+  playedAt: string      // When they played it
 }

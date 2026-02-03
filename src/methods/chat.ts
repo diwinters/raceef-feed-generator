@@ -1736,5 +1736,163 @@ export default function (app: Express, ctx: AppContext) {
     }
   })
 
+  // ============================================
+  // VOICE MESSAGE PLAYED TRACKING
+  // ============================================
+
+  /**
+   * POST /chat/voice/:messageId/played
+   * Mark a voice message as played by the current user
+   */
+  app.post('/chat/voice/:messageId/played', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { messageId } = req.params
+      const timestamp = now()
+
+      // Verify the message exists and has a voice embed
+      const message = await ctx.db
+        .selectFrom('message')
+        .selectAll()
+        .where('id', '=', messageId)
+        .executeTakeFirst()
+
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' })
+      }
+
+      // Check if this is a voice message
+      if (message.embed) {
+        try {
+          const embed = JSON.parse(message.embed)
+          if (embed.$type !== 'app.raceef.embed.voice') {
+            return res.status(400).json({ error: 'Message is not a voice message' })
+          }
+        } catch {
+          return res.status(400).json({ error: 'Invalid embed format' })
+        }
+      } else {
+        return res.status(400).json({ error: 'Message is not a voice message' })
+      }
+
+      // Insert or update the played record
+      await ctx.db
+        .insertInto('voice_played')
+        .values({
+          messageId,
+          listenerDid: userDid,
+          playedAt: timestamp,
+        })
+        .onConflict((oc) =>
+          oc.columns(['messageId', 'listenerDid']).doNothing()
+        )
+        .execute()
+
+      return res.json({ success: true, playedAt: timestamp })
+    } catch (error) {
+      console.error('[Raceef Chat] Error marking voice as played:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * GET /chat/voice/:messageId/played
+   * Check if a voice message has been played by the current user
+   */
+  app.get('/chat/voice/:messageId/played', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { messageId } = req.params
+
+      const played = await ctx.db
+        .selectFrom('voice_played')
+        .selectAll()
+        .where('messageId', '=', messageId)
+        .where('listenerDid', '=', userDid)
+        .executeTakeFirst()
+
+      return res.json({
+        played: !!played,
+        playedAt: played?.playedAt || null,
+      })
+    } catch (error) {
+      console.error('[Raceef Chat] Error checking voice played:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * GET /chat/convo/:convoId/voice-played
+   * Get played status for all voice messages in a conversation
+   * Returns map of messageId -> { played: boolean, playedAt: string | null }
+   */
+  app.get('/chat/convo/:convoId/voice-played', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { convoId } = req.params
+
+      // Verify user is a member of this conversation
+      const membership = await ctx.db
+        .selectFrom('conversation_member')
+        .selectAll()
+        .where('conversationId', '=', convoId)
+        .where('memberDid', '=', userDid)
+        .executeTakeFirst()
+
+      if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this conversation' })
+      }
+
+      // Get all voice messages in this conversation
+      const voiceMessages = await ctx.db
+        .selectFrom('message')
+        .select(['id', 'embed', 'senderDid'])
+        .where('conversationId', '=', convoId)
+        .where('embed', 'is not', null)
+        .where('deletedAt', 'is', null)
+        .execute()
+
+      // Filter to only voice messages
+      const voiceMessageIds = voiceMessages
+        .filter(m => {
+          try {
+            const embed = JSON.parse(m.embed!)
+            return embed.$type === 'app.raceef.embed.voice'
+          } catch {
+            return false
+          }
+        })
+        .map(m => m.id)
+
+      if (voiceMessageIds.length === 0) {
+        return res.json({ voicePlayed: {} })
+      }
+
+      // Get played status for these messages
+      const playedRecords = await ctx.db
+        .selectFrom('voice_played')
+        .selectAll()
+        .where('messageId', 'in', voiceMessageIds)
+        .where('listenerDid', '=', userDid)
+        .execute()
+
+      // Build response map
+      const voicePlayed: Record<string, { played: boolean; playedAt: string | null }> = {}
+      
+      for (const msgId of voiceMessageIds) {
+        const record = playedRecords.find(r => r.messageId === msgId)
+        voicePlayed[msgId] = {
+          played: !!record,
+          playedAt: record?.playedAt || null,
+        }
+      }
+
+      return res.json({ voicePlayed })
+    } catch (error) {
+      console.error('[Raceef Chat] Error getting voice played status:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
   console.log('[Raceef Chat] Chat routes initialized')
 }
