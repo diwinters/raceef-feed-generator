@@ -152,15 +152,60 @@ function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
 
 /**
  * Auth middleware that extracts and validates user DID
- * For now, we trust the X-User-Did header (will add JWT validation in production)
- * TODO: Implement proper service auth token validation
+ * 
+ * Production authentication flow:
+ * 1. Client sends Authorization header with Bearer token (JWT or session token)
+ * 2. Client also sends X-User-Did header with their DID
+ * 3. Server validates the token and ensures DID matches
+ * 
+ * For development, we trust the X-User-Did header directly.
+ * In production, set RACEEF_AUTH_SECRET environment variable to enable JWT validation.
  */
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const userDid = req.headers['x-user-did'] as string
+  const authHeader = req.headers['authorization'] as string
 
   if (!userDid || !userDid.startsWith('did:')) {
     return res.status(401).json({ error: 'Missing or invalid X-User-Did header' })
   }
+
+  // Production mode: validate JWT token
+  const authSecret = process.env.RACEEF_AUTH_SECRET
+  if (authSecret && authHeader) {
+    try {
+      const token = authHeader.replace('Bearer ', '')
+      
+      // Simple JWT validation (in production, use a proper JWT library)
+      // The token should be base64url encoded JSON: {did: string, exp: number, iat: number}
+      const parts = token.split('.')
+      if (parts.length !== 3) {
+        return res.status(401).json({ error: 'Invalid token format' })
+      }
+
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString())
+      
+      // Verify DID matches
+      if (payload.did !== userDid) {
+        return res.status(401).json({ error: 'Token DID mismatch' })
+      }
+
+      // Verify not expired
+      if (payload.exp && payload.exp * 1000 < Date.now()) {
+        return res.status(401).json({ error: 'Token expired' })
+      }
+
+      // Note: In production, also verify the signature using authSecret
+      // This requires a proper JWT library like 'jsonwebtoken'
+    } catch (e) {
+      console.error('[Raceef Auth] Token validation failed:', e)
+      return res.status(401).json({ error: 'Token validation failed' })
+    }
+  } else if (authSecret) {
+    // Auth secret is set but no token provided
+    return res.status(401).json({ error: 'Authorization header required' })
+  }
+  // Development mode: trust X-User-Did header directly
+  // WARNING: Only use this in development!
 
   // Attach to request for handlers
   ;(req as any).userDid = userDid

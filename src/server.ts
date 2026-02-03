@@ -13,6 +13,8 @@ import { createDb, Database, migrateToLatest } from './db'
 import { FirehoseSubscription } from './subscription'
 import { AppContext, Config } from './config'
 import wellKnown from './well-known'
+import { log } from './logger'
+import { initSentry, sentryRequestHandler, sentryErrorHandler, captureError } from './monitoring'
 
 export class FeedGenerator {
   public app: express.Application
@@ -20,6 +22,7 @@ export class FeedGenerator {
   public db: Database
   public firehose: FirehoseSubscription
   public cfg: Config
+  private startTime: Date
 
   constructor(
     app: express.Application,
@@ -31,10 +34,18 @@ export class FeedGenerator {
     this.db = db
     this.firehose = firehose
     this.cfg = cfg
+    this.startTime = new Date()
   }
 
   static create(cfg: Config) {
+    // Initialize Sentry for error tracking
+    initSentry()
+
     const app = express()
+
+    // Add Sentry request handler (must be first)
+    app.use(sentryRequestHandler())
+
     // Middleware to bypass ngrok browser warning
     app.use((req, res, next) => {
       // Check if response is already sent before setting headers
@@ -67,6 +78,72 @@ export class FeedGenerator {
       didResolver,
       cfg,
     }
+
+    // Health check endpoint for monitoring
+    app.get('/health', async (_req, res) => {
+      try {
+        // Basic database connectivity check
+        await db.selectFrom('post').select('uri').limit(1).execute()
+        
+        res.json({
+          status: 'healthy',
+          timestamp: new Date().toISOString(),
+          version: process.env.npm_package_version || '1.0.0',
+          services: {
+            database: 'connected',
+            firehose: firehose ? 'running' : 'stopped',
+          },
+        })
+      } catch (error) {
+        log(`Health check failed: ${error}`)
+        res.status(503).json({
+          status: 'unhealthy',
+          timestamp: new Date().toISOString(),
+          error: 'Database connection failed',
+        })
+      }
+    })
+
+    // Readiness check for load balancers
+    app.get('/ready', async (_req, res) => {
+      try {
+        await db.selectFrom('post').select('uri').limit(1).execute()
+        res.status(200).send('ready')
+      } catch {
+        res.status(503).send('not ready')
+      }
+    })
+
+    // Liveness check for container orchestration
+    app.get('/live', (_req, res) => {
+      res.status(200).send('alive')
+    })
+
+    // Metrics endpoint for monitoring
+    app.get('/metrics', async (_req, res) => {
+      try {
+        const [postCount, conversationCount, messageCount, storyCount] = await Promise.all([
+          db.selectFrom('post').select(db.fn.count('uri').as('count')).executeTakeFirst(),
+          db.selectFrom('conversation').select(db.fn.count('id').as('count')).executeTakeFirst(),
+          db.selectFrom('message').select(db.fn.count('id').as('count')).executeTakeFirst(),
+          db.selectFrom('story').select(db.fn.count('id').as('count')).executeTakeFirst(),
+        ])
+
+        res.json({
+          timestamp: new Date().toISOString(),
+          database: {
+            posts: Number(postCount?.count || 0),
+            conversations: Number(conversationCount?.count || 0),
+            messages: Number(messageCount?.count || 0),
+            stories: Number(storyCount?.count || 0),
+          },
+        })
+      } catch (error) {
+        log(`Metrics failed: ${error}`)
+        res.status(500).json({error: 'Failed to collect metrics'})
+      }
+    })
+
     feedGeneration(server, ctx)
     describeGenerator(server, ctx)
     app.use(server.xrpc.router)
@@ -75,6 +152,16 @@ export class FeedGenerator {
     stories(app, ctx)
     media(app, ctx)
     chat(app, ctx)
+
+    // Add Sentry error handler (must be after all routes)
+    app.use(sentryErrorHandler())
+
+    // Global error handler
+    app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      log(`Unhandled error: ${err.message}`)
+      captureError(err)
+      res.status(500).json({error: 'Internal server error'})
+    })
 
     return new FeedGenerator(app, db, firehose, cfg)
   }
