@@ -635,6 +635,28 @@ export default function (app: Express, ctx: AppContext) {
         }
       })
 
+      // Auto-mark messages as delivered when fetched (for messages not from self)
+      const messagesToMarkDelivered = results.filter(m => m.senderDid !== userDid && !m.deletedAt)
+      if (messagesToMarkDelivered.length > 0) {
+        const timestamp = now()
+        // Batch insert delivery status (ignore conflicts)
+        await Promise.all(
+          messagesToMarkDelivered.map(m =>
+            ctx.db
+              .insertInto('message_status')
+              .values({
+                messageId: m.id,
+                recipientDid: userDid,
+                deliveredAt: timestamp,
+                readAt: null,
+              })
+              .onConflict((oc) => oc.columns(['messageId', 'recipientDid']).doNothing())
+              .execute()
+              .catch(() => {}) // Ignore errors for individual inserts
+          )
+        )
+      }
+
       const nextCursor = hasMore ? results[results.length - 1].rev : undefined
 
       return res.json({
@@ -1153,6 +1175,506 @@ export default function (app: Express, ctx: AppContext) {
       return res.json({ success: true })
     } catch (error) {
       console.error('[Raceef Chat] Error leaving conversation:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  // ========================================
+  // MESSAGE STATUS ENDPOINTS
+  // ========================================
+
+  /**
+   * POST /chat/convo/:convoId/message/:messageId/delivered
+   * Mark a message as delivered to the recipient
+   */
+  app.post('/chat/convo/:convoId/message/:messageId/delivered', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { convoId, messageId } = req.params
+      const timestamp = now()
+
+      // Verify user is a member of this conversation
+      const membership = await ctx.db
+        .selectFrom('conversation_member')
+        .select('memberDid')
+        .where('conversationId', '=', convoId)
+        .where('memberDid', '=', userDid)
+        .where('status', '!=', 'left')
+        .executeTakeFirst()
+
+      if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this conversation' })
+      }
+
+      // Verify the message exists and user is not the sender
+      const message = await ctx.db
+        .selectFrom('message')
+        .select(['id', 'senderDid'])
+        .where('id', '=', messageId)
+        .where('conversationId', '=', convoId)
+        .executeTakeFirst()
+
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' })
+      }
+
+      // Can't mark your own message as delivered
+      if (message.senderDid === userDid) {
+        return res.status(400).json({ error: 'Cannot mark own message as delivered' })
+      }
+
+      // Upsert delivery status
+      await ctx.db
+        .insertInto('message_status')
+        .values({
+          messageId,
+          recipientDid: userDid,
+          deliveredAt: timestamp,
+          readAt: null,
+        })
+        .onConflict((oc) =>
+          oc.columns(['messageId', 'recipientDid']).doUpdateSet({
+            deliveredAt: timestamp,
+          })
+        )
+        .execute()
+
+      // Create status event for real-time updates
+      const rev = generateRev()
+      await ctx.db
+        .insertInto('message_event')
+        .values({
+          conversationId: convoId,
+          eventType: 'status',
+          payload: JSON.stringify({
+            $type: 'chat.raceef.convo.defs#messageStatusUpdate',
+            rev,
+            convoId,
+            messageId,
+            recipientDid: userDid,
+            status: 'delivered',
+            timestamp,
+          }),
+          rev,
+          createdAt: timestamp,
+        })
+        .execute()
+
+      return res.json({ success: true })
+    } catch (error) {
+      console.error('[Raceef Chat] Error marking message delivered:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * POST /chat/convo/:convoId/message/:messageId/read
+   * Mark a message as read by the recipient
+   */
+  app.post('/chat/convo/:convoId/message/:messageId/read', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { convoId, messageId } = req.params
+      const timestamp = now()
+
+      // Check user's privacy settings - if they have read receipts disabled, don't record
+      const privacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .select('showReadReceipts')
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      // Default is enabled (1), only skip if explicitly disabled (0)
+      if (privacy && privacy.showReadReceipts === 0) {
+        return res.json({ success: true, note: 'Read receipts disabled' })
+      }
+
+      // Verify user is a member of this conversation
+      const membership = await ctx.db
+        .selectFrom('conversation_member')
+        .select('memberDid')
+        .where('conversationId', '=', convoId)
+        .where('memberDid', '=', userDid)
+        .where('status', '!=', 'left')
+        .executeTakeFirst()
+
+      if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this conversation' })
+      }
+
+      // Verify the message exists
+      const message = await ctx.db
+        .selectFrom('message')
+        .select(['id', 'senderDid'])
+        .where('id', '=', messageId)
+        .where('conversationId', '=', convoId)
+        .executeTakeFirst()
+
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' })
+      }
+
+      // Can't mark your own message as read
+      if (message.senderDid === userDid) {
+        return res.status(400).json({ error: 'Cannot mark own message as read' })
+      }
+
+      // Check if already has a status record
+      const existingStatus = await ctx.db
+        .selectFrom('message_status')
+        .select('deliveredAt')
+        .where('messageId', '=', messageId)
+        .where('recipientDid', '=', userDid)
+        .executeTakeFirst()
+
+      // Upsert read status (preserve existing deliveredAt if present)
+      await ctx.db
+        .insertInto('message_status')
+        .values({
+          messageId,
+          recipientDid: userDid,
+          deliveredAt: timestamp,
+          readAt: timestamp,
+        })
+        .onConflict((oc) =>
+          oc.columns(['messageId', 'recipientDid']).doUpdateSet({
+            deliveredAt: existingStatus?.deliveredAt || timestamp,
+            readAt: timestamp,
+          })
+        )
+        .execute()
+
+      // Create status event for real-time updates
+      const rev = generateRev()
+      await ctx.db
+        .insertInto('message_event')
+        .values({
+          conversationId: convoId,
+          eventType: 'status',
+          payload: JSON.stringify({
+            $type: 'chat.raceef.convo.defs#messageStatusUpdate',
+            rev,
+            convoId,
+            messageId,
+            recipientDid: userDid,
+            status: 'read',
+            timestamp,
+          }),
+          rev,
+          createdAt: timestamp,
+        })
+        .execute()
+
+      return res.json({ success: true })
+    } catch (error) {
+      console.error('[Raceef Chat] Error marking message read:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * GET /chat/convo/:convoId/message/:messageId/status
+   * Get delivery/read status for a message
+   */
+  app.get('/chat/convo/:convoId/message/:messageId/status', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { convoId, messageId } = req.params
+
+      // Verify user is a member
+      const membership = await ctx.db
+        .selectFrom('conversation_member')
+        .select('memberDid')
+        .where('conversationId', '=', convoId)
+        .where('memberDid', '=', userDid)
+        .where('status', '!=', 'left')
+        .executeTakeFirst()
+
+      if (!membership) {
+        return res.status(403).json({ error: 'Not a member of this conversation' })
+      }
+
+      // Check if user has read receipts enabled
+      const privacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .select('showReadReceipts')
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      // If user disabled read receipts, they can't see others' status (reciprocal)
+      if (privacy && privacy.showReadReceipts === 0) {
+        return res.json({
+          messageId,
+          status: 'sent', // They only see sent status
+          privacyBlocked: true,
+        })
+      }
+
+      // Get message and status
+      const message = await ctx.db
+        .selectFrom('message')
+        .select(['id', 'senderDid'])
+        .where('id', '=', messageId)
+        .where('conversationId', '=', convoId)
+        .executeTakeFirst()
+
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' })
+      }
+
+      // Get all status entries for this message
+      const statuses = await ctx.db
+        .selectFrom('message_status')
+        .selectAll()
+        .where('messageId', '=', messageId)
+        .execute()
+
+      // Determine overall status
+      let overallStatus: 'sending' | 'sent' | 'delivered' | 'read' = 'sent'
+      
+      if (statuses.length > 0) {
+        const allDelivered = statuses.every(s => s.deliveredAt)
+        const allRead = statuses.every(s => s.readAt)
+        
+        if (allRead) {
+          overallStatus = 'read'
+        } else if (allDelivered) {
+          overallStatus = 'delivered'
+        }
+      }
+
+      return res.json({
+        messageId,
+        status: overallStatus,
+        recipients: statuses.map(s => ({
+          did: s.recipientDid,
+          deliveredAt: s.deliveredAt,
+          readAt: s.readAt,
+        })),
+      })
+    } catch (error) {
+      console.error('[Raceef Chat] Error getting message status:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  // ========================================
+  // USER PRESENCE ENDPOINTS
+  // ========================================
+
+  /**
+   * POST /chat/presence
+   * Update user's online presence
+   */
+  app.post('/chat/presence', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { isOnline } = req.body
+      const timestamp = now()
+
+      // Check if user has online status enabled
+      const privacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .select('showOnlineStatus')
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      // If disabled, still update lastSeenAt but don't broadcast online status
+      const shouldBroadcast = !privacy || privacy.showOnlineStatus === 1
+
+      // Upsert presence
+      await ctx.db
+        .insertInto('user_presence')
+        .values({
+          did: userDid,
+          isOnline: shouldBroadcast && isOnline ? 1 : 0,
+          lastSeenAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .onConflict((oc) =>
+          oc.column('did').doUpdateSet({
+            isOnline: shouldBroadcast && isOnline ? 1 : 0,
+            lastSeenAt: timestamp,
+            updatedAt: timestamp,
+          })
+        )
+        .execute()
+
+      return res.json({ success: true })
+    } catch (error) {
+      console.error('[Raceef Chat] Error updating presence:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * POST /chat/presence/batch
+   * Get presence for multiple users
+   */
+  app.post('/chat/presence/batch', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { dids } = req.body
+
+      if (!Array.isArray(dids) || dids.length === 0) {
+        return res.status(400).json({ error: 'dids must be a non-empty array' })
+      }
+
+      // Limit batch size
+      const limitedDids = dids.slice(0, 100)
+
+      // Check if requesting user has online status enabled (reciprocal privacy)
+      const myPrivacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .select('showOnlineStatus')
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      // If user disabled their own online status, they can't see others'
+      if (myPrivacy && myPrivacy.showOnlineStatus === 0) {
+        return res.json({
+          presences: limitedDids.map(did => ({
+            did,
+            isOnline: false,
+            lastSeenAt: null,
+            privacyBlocked: true,
+          })),
+        })
+      }
+
+      // Get presence for each user, respecting their privacy settings
+      const presences = await ctx.db
+        .selectFrom('user_presence')
+        .leftJoin('chat_privacy', 'chat_privacy.did', 'user_presence.did')
+        .select([
+          'user_presence.did',
+          'user_presence.isOnline',
+          'user_presence.lastSeenAt',
+          'chat_privacy.showOnlineStatus',
+          'chat_privacy.showLastSeen',
+        ])
+        .where('user_presence.did', 'in', limitedDids)
+        .execute()
+
+      // Build response, respecting each user's privacy
+      const presenceMap = new Map(presences.map(p => [p.did, p]))
+      
+      const result = limitedDids.map(did => {
+        const p = presenceMap.get(did)
+        
+        if (!p) {
+          // User has no presence record
+          return { did, isOnline: false, lastSeenAt: null }
+        }
+
+        // Check user's privacy settings
+        const showOnline = p.showOnlineStatus === null || p.showOnlineStatus === 1
+        const showLastSeen = p.showLastSeen === null || p.showLastSeen === 1
+
+        return {
+          did,
+          isOnline: showOnline ? p.isOnline === 1 : false,
+          lastSeenAt: showLastSeen ? p.lastSeenAt : null,
+        }
+      })
+
+      return res.json({ presences: result })
+    } catch (error) {
+      console.error('[Raceef Chat] Error getting presence batch:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  // ========================================
+  // PRIVACY SETTINGS ENDPOINTS
+  // ========================================
+
+  /**
+   * GET /chat/privacy
+   * Get user's chat privacy settings
+   */
+  app.get('/chat/privacy', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+
+      const privacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .selectAll()
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      if (!privacy) {
+        // Return defaults
+        return res.json({
+          showReadReceipts: true,
+          showOnlineStatus: true,
+          showLastSeen: true,
+        })
+      }
+
+      return res.json({
+        showReadReceipts: privacy.showReadReceipts === 1,
+        showOnlineStatus: privacy.showOnlineStatus === 1,
+        showLastSeen: privacy.showLastSeen === 1,
+      })
+    } catch (error) {
+      console.error('[Raceef Chat] Error getting privacy settings:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  /**
+   * PUT /chat/privacy
+   * Update user's chat privacy settings
+   */
+  app.put('/chat/privacy', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { showReadReceipts, showOnlineStatus, showLastSeen } = req.body
+      const timestamp = now()
+
+      // Build update object with only provided fields
+      const updates: Record<string, number | string> = { updatedAt: timestamp }
+      
+      if (typeof showReadReceipts === 'boolean') {
+        updates.showReadReceipts = showReadReceipts ? 1 : 0
+      }
+      if (typeof showOnlineStatus === 'boolean') {
+        updates.showOnlineStatus = showOnlineStatus ? 1 : 0
+      }
+      if (typeof showLastSeen === 'boolean') {
+        updates.showLastSeen = showLastSeen ? 1 : 0
+      }
+
+      // Upsert privacy settings
+      await ctx.db
+        .insertInto('chat_privacy')
+        .values({
+          did: userDid,
+          showReadReceipts: showReadReceipts !== false ? 1 : 0,
+          showOnlineStatus: showOnlineStatus !== false ? 1 : 0,
+          showLastSeen: showLastSeen !== false ? 1 : 0,
+          updatedAt: timestamp,
+        })
+        .onConflict((oc) =>
+          oc.column('did').doUpdateSet(updates)
+        )
+        .execute()
+
+      // Get updated settings
+      const privacy = await ctx.db
+        .selectFrom('chat_privacy')
+        .selectAll()
+        .where('did', '=', userDid)
+        .executeTakeFirst()
+
+      return res.json({
+        showReadReceipts: privacy?.showReadReceipts === 1,
+        showOnlineStatus: privacy?.showOnlineStatus === 1,
+        showLastSeen: privacy?.showLastSeen === 1,
+      })
+    } catch (error) {
+      console.error('[Raceef Chat] Error updating privacy settings:', error)
       return res.status(500).json({ error: 'Internal server error' })
     }
   })

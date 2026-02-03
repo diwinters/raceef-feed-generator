@@ -13,6 +13,12 @@ export type DatabaseSchema = {
   conversation_member: ConversationMember
   message: Message
   message_event: MessageEvent
+  // Message status tracking
+  message_status: MessageStatus
+  // User presence tracking
+  user_presence: UserPresence
+  // Chat privacy settings
+  chat_privacy: ChatPrivacy
 }
 
 export type Post = {
@@ -135,4 +141,41 @@ export type MessageEvent = {
   payload: string       // JSON of the event data
   rev: string           // Same rev as the message for ordering
   createdAt: string     // ISO timestamp
+}
+
+// ============================================
+// MESSAGE STATUS TRACKING
+// ============================================
+
+// Track message delivery/read status per recipient
+export type MessageStatus = {
+  messageId: string     // FK to message.id
+  recipientDid: string  // Who received/read the message
+  deliveredAt: string | null  // When delivered to recipient's device
+  readAt: string | null       // When recipient actually read it
+}
+
+// ============================================
+// USER PRESENCE
+// ============================================
+
+// Track user's online status
+export type UserPresence = {
+  did: string           // User's DID (primary key)
+  isOnline: number      // 0 = offline, 1 = online
+  lastSeenAt: string    // Last activity timestamp
+  updatedAt: string     // When presence was last updated
+}
+
+// ============================================
+// CHAT PRIVACY SETTINGS
+// ============================================
+
+// User's chat privacy preferences
+export type ChatPrivacy = {
+  did: string           // User's DID (primary key)
+  showReadReceipts: number    // 0 = disabled, 1 = enabled
+  showOnlineStatus: number    // 0 = disabled, 1 = enabled
+  showLastSeen: number        // 0 = disabled, 1 = enabled
+  updatedAt: string
 }

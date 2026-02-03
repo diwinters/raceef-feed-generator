@@ -313,3 +313,54 @@ migrations['007'] = {
     // SQLite doesn't support DROP COLUMN easily, so we skip this
   },
 }
+
+// Migration 008: Message status, user presence, and chat privacy tables
+migrations['008'] = {
+  async up(db: Kysely<unknown>) {
+    // Message status tracking table
+    await db.schema
+      .createTable('message_status')
+      .addColumn('messageId', 'varchar', (col) => col.notNull())
+      .addColumn('recipientDid', 'varchar', (col) => col.notNull())
+      .addColumn('deliveredAt', 'varchar')
+      .addColumn('readAt', 'varchar')
+      .execute()
+    // Primary key on (messageId, recipientDid)
+    await db.schema
+      .createIndex('message_status_pk')
+      .on('message_status')
+      .columns(['messageId', 'recipientDid'])
+      .unique()
+      .execute()
+    // Index for message lookups
+    await db.schema
+      .createIndex('message_status_msg_idx')
+      .on('message_status')
+      .column('messageId')
+      .execute()
+
+    // User presence table
+    await db.schema
+      .createTable('user_presence')
+      .addColumn('did', 'varchar', (col) => col.primaryKey())
+      .addColumn('isOnline', 'integer', (col) => col.notNull().defaultTo(0))
+      .addColumn('lastSeenAt', 'varchar', (col) => col.notNull())
+      .addColumn('updatedAt', 'varchar', (col) => col.notNull())
+      .execute()
+
+    // Chat privacy settings table
+    await db.schema
+      .createTable('chat_privacy')
+      .addColumn('did', 'varchar', (col) => col.primaryKey())
+      .addColumn('showReadReceipts', 'integer', (col) => col.notNull().defaultTo(1))
+      .addColumn('showOnlineStatus', 'integer', (col) => col.notNull().defaultTo(1))
+      .addColumn('showLastSeen', 'integer', (col) => col.notNull().defaultTo(1))
+      .addColumn('updatedAt', 'varchar', (col) => col.notNull())
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('chat_privacy').execute()
+    await db.schema.dropTable('user_presence').execute()
+    await db.schema.dropTable('message_status').execute()
+  },
+}
