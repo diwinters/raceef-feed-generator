@@ -132,3 +132,6 @@ dist
 # intellij
 .idea/
 *.iml
+# SQLite database
+db.sqlite
+db.sqlite-journal
