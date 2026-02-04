@@ -203,11 +203,24 @@ export function setupWebSocket(
   didResolver: DidResolver
 ): WebSocketServer {
   const wss = new WebSocketServer({ 
-    server,
-    path: '/ws'
+    noServer: true  // Handle upgrade manually
   })
   
   log('[WS] WebSocket server initialized on /ws')
+  
+  // Handle upgrade requests manually
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname
+    
+    if (pathname === '/ws') {
+      log('[WS] Handling upgrade request')
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request)
+      })
+    } else {
+      socket.destroy()
+    }
+  })
   
   // Heartbeat check interval
   const heartbeatInterval = setInterval(() => {
@@ -237,10 +250,16 @@ export function setupWebSocket(
     clearInterval(heartbeatInterval)
   })
   
+  wss.on('error', (error) => {
+    log(`[WS] WebSocket server error: ${error}`)
+  })
+  
   wss.on('connection', async (ws, req) => {
+    log('[WS] New connection received')
     // Authenticate (now async with proper JWT verification)
     const userDid = await authenticateConnection(req, db, serviceDid, didResolver)
     if (!userDid) {
+      log('[WS] Authentication failed, closing connection')
       ws.close(4001, 'Unauthorized')
       return
     }
