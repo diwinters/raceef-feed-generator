@@ -12,7 +12,6 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import http from 'http'
 import { URL } from 'url'
-import { Duplex } from 'stream'
 import { Database } from './db'
 import { log } from './logger'
 import { DidResolver } from '@atproto/identity'
@@ -204,30 +203,20 @@ export function setupWebSocket(
   didResolver: DidResolver
 ): WebSocketServer {
   const wss = new WebSocketServer({ 
-    noServer: true  // Handle upgrade manually
+    server,
+    path: '/ws',
+    verifyClient: (info, callback) => {
+      log('[WS] verifyClient called')
+      // We'll do actual auth in connection handler
+      callback(true)
+    }
   })
   
   log('[WS] WebSocket server initialized on /ws')
   
-  // Handle upgrade requests manually
-  server.on('upgrade', (request: http.IncomingMessage, socket: Duplex, head: Buffer) => {
-    const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname
-    
-    if (pathname === '/ws') {
-      log('[WS] Handling upgrade request')
-      
-      // Add error handler for socket
-      socket.on('error', (err: Error) => {
-        log(`[WS] Socket error during upgrade: ${err}`)
-      })
-      
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        log('[WS] Upgrade complete, emitting connection')
-        wss.emit('connection', ws, request)
-      })
-    } else {
-      socket.destroy()
-    }
+  // Handle errors on the server
+  wss.on('error', (error) => {
+    log(`[WS] WebSocket server error: ${error.message}`)
   })
   
   // Heartbeat check interval
