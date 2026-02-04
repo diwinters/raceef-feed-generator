@@ -15,10 +15,13 @@ import { AppContext, Config } from './config'
 import wellKnown from './well-known'
 import { log } from './logger'
 import { initSentry, sentryRequestHandler, sentryErrorHandler, captureError } from './monitoring'
+import { setupWebSocket } from './websocket'
+import { WebSocketServer } from 'ws'
 
 export class FeedGenerator {
   public app: express.Application
   public server?: http.Server
+  public wss?: WebSocketServer
   public db: Database
   public firehose: FirehoseSubscription
   public cfg: Config
@@ -171,6 +174,11 @@ export class FeedGenerator {
     this.firehose.run(this.cfg.subscriptionReconnectDelay)
     this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
     await events.once(this.server, 'listening')
+    
+    // Set up WebSocket server on the same HTTP server
+    this.wss = setupWebSocket(this.server, this.db)
+    log(`[Server] WebSocket server ready on ws://localhost:${this.cfg.port}/ws`)
+    
     return this.server
   }
 }

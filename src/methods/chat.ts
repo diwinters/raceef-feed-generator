@@ -2,6 +2,12 @@ import { Express, Request, Response, NextFunction } from 'express'
 import { AppContext } from '../config'
 import { v4 as uuidv4 } from 'uuid'
 import crypto from 'crypto'
+import { 
+  broadcastNewMessage, 
+  broadcastMessageDeleted, 
+  broadcastReadReceipt, 
+  broadcastReaction 
+} from '../websocket'
 
 // ============================================
 // TYPES (matching Bluesky chat schema)
@@ -83,14 +89,36 @@ function now(): string {
 
 /**
  * Build a MessageView from a database message record
+ * Includes message status for the requesting user
  */
-async function buildMessageView(ctx: AppContext, message: any): Promise<MessageView> {
+async function buildMessageView(ctx: AppContext, message: any, requestingUserDid?: string): Promise<MessageView> {
   let reactions: Array<{ value: string; sender: { did: string } }> | undefined
   if (message.reactions) {
     try {
       reactions = JSON.parse(message.reactions)
     } catch {
       reactions = undefined
+    }
+  }
+
+  // Calculate message status if requesting user is the sender
+  let status: 'sending' | 'sent' | 'delivered' | 'read' = 'sent'
+  if (requestingUserDid && message.senderDid === requestingUserDid) {
+    const statuses = await ctx.db
+      .selectFrom('message_status')
+      .select(['deliveredAt', 'readAt'])
+      .where('messageId', '=', message.id)
+      .execute()
+    
+    if (statuses.length > 0) {
+      const allDelivered = statuses.every(s => s.deliveredAt)
+      const allRead = statuses.every(s => s.readAt)
+      
+      if (allRead) {
+        status = 'read'
+      } else if (allDelivered) {
+        status = 'delivered'
+      }
     }
   }
 
@@ -104,7 +132,8 @@ async function buildMessageView(ctx: AppContext, message: any): Promise<MessageV
     sender: { did: message.senderDid },
     sentAt: message.createdAt,
     reactions,
-  }
+    status, // Add status field
+  } as any // Cast to avoid type issues
 }
 
 // Rate limiting (reuse pattern from get-reactions.ts)
@@ -819,6 +848,9 @@ export default function (app: Express, ctx: AppContext) {
         .where('memberDid', '=', userDid)
         .execute()
 
+      // Broadcast via WebSocket to other conversation members
+      broadcastNewMessage(ctx.db, convoId, messageView, userDid)
+
       return res.json(messageView)
     } catch (error) {
       console.error('[Raceef Chat] Error sending message:', error)
@@ -885,9 +917,107 @@ export default function (app: Express, ctx: AppContext) {
         })
         .execute()
 
+      // This is "delete for me" - no broadcast needed (only affects sender's view)
       return res.json(deletedView)
     } catch (error) {
       console.error('[Raceef Chat] Error deleting message:', error)
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+  })
+
+  // ========================================
+  // DELETE /chat/convo/:convoId/message/:messageId/everyone - Delete message for everyone
+  // WhatsApp-style: Can only delete within 1 hour of sending
+  // ========================================
+  app.delete('/chat/convo/:convoId/message/:messageId/everyone', async (req: Request, res: Response) => {
+    try {
+      const userDid = (req as any).userDid as string
+      const { convoId, messageId } = req.params
+
+      // Get message and verify ownership
+      const message = await ctx.db
+        .selectFrom('message')
+        .selectAll()
+        .where('id', '=', messageId)
+        .where('conversationId', '=', convoId)
+        .executeTakeFirst()
+
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' })
+      }
+
+      if (message.senderDid !== userDid) {
+        return res.status(403).json({ error: 'You can only delete your own messages' })
+      }
+
+      // Check if already deleted
+      if (message.deletedAt) {
+        return res.status(400).json({ error: 'Message already deleted' })
+      }
+
+      // Check 1-hour time window (WhatsApp standard)
+      const messageTime = new Date(message.createdAt).getTime()
+      const currentTime = Date.now()
+      const oneHourMs = 60 * 60 * 1000
+
+      if (currentTime - messageTime > oneHourMs) {
+        return res.status(400).json({ 
+          error: 'Cannot delete for everyone after 1 hour',
+          timeRemaining: 0 
+        })
+      }
+
+      // Hard delete the message content (keep record with deletedForEveryone flag)
+      const rev = generateRev()
+      const timestamp = now()
+
+      await ctx.db
+        .updateTable('message')
+        .set({ 
+          deletedAt: timestamp,
+          text: '', // Clear text
+          facets: null,
+          embed: null,
+          reactions: null,
+        })
+        .where('id', '=', messageId)
+        .execute()
+
+      // Create delete event with "everyone" flag
+      const deletedView: DeletedMessageView = {
+        $type: 'chat.bsky.convo.defs#deletedMessageView',
+        id: messageId,
+        rev: message.rev,
+        sender: { did: message.senderDid },
+        sentAt: message.createdAt,
+      }
+
+      await ctx.db
+        .insertInto('message_event')
+        .values({
+          conversationId: convoId,
+          eventType: 'delete_everyone',
+          payload: JSON.stringify({
+            $type: 'chat.bsky.convo.defs#logDeleteMessage',
+            rev,
+            convoId,
+            message: deletedView,
+            deletedForEveryone: true,
+          }),
+          rev,
+          createdAt: timestamp,
+        })
+        .execute()
+
+      // Broadcast deletion to all conversation members via WebSocket
+      broadcastMessageDeleted(ctx.db, convoId, messageId, 'everyone')
+
+      return res.json({ 
+        ...deletedView,
+        deletedForEveryone: true 
+      })
+    } catch (error) {
+      console.error('[Raceef Chat] Error deleting message for everyone:', error)
       return res.status(500).json({ error: 'Internal server error' })
     }
   })
@@ -947,7 +1077,7 @@ export default function (app: Express, ctx: AppContext) {
       )
       if (existingIndex >= 0) {
         // Already exists, return current state
-        const messageView = await buildMessageView(ctx, message)
+        const messageView = await buildMessageView(ctx, message, userDid)
         return res.json({ message: messageView })
       }
 
@@ -988,6 +1118,9 @@ export default function (app: Express, ctx: AppContext) {
         })
         .execute()
 
+      // Broadcast reaction via WebSocket
+      broadcastReaction(ctx.db, convoId, messageId, userDid, value, 'add')
+
       // Return updated message
       const updatedMessage = await ctx.db
         .selectFrom('message')
@@ -995,7 +1128,7 @@ export default function (app: Express, ctx: AppContext) {
         .where('id', '=', messageId)
         .executeTakeFirst()
 
-      const messageView = await buildMessageView(ctx, updatedMessage!)
+      const messageView = await buildMessageView(ctx, updatedMessage!, userDid)
       return res.json({ message: messageView })
     } catch (error) {
       console.error('[Raceef Chat] Error adding reaction:', error)
@@ -1090,6 +1223,9 @@ export default function (app: Express, ctx: AppContext) {
           createdAt: timestamp,
         })
         .execute()
+
+      // Broadcast reaction removal via WebSocket
+      broadcastReaction(ctx.db, convoId, messageId, userDid, value, 'remove')
 
       return res.json({ success: true })
     } catch (error) {
