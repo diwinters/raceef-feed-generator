@@ -12,6 +12,7 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import http from 'http'
 import { URL } from 'url'
+import { Duplex } from 'stream'
 import { Database } from './db'
 import { log } from './logger'
 import { DidResolver } from '@atproto/identity'
@@ -209,26 +210,21 @@ export function setupWebSocket(
   log('[WS] WebSocket server initialized on /ws')
   
   // Handle upgrade requests manually
-  server.on('upgrade', (request, socket, head) => {
+  server.on('upgrade', (request: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname
     
     if (pathname === '/ws') {
       log('[WS] Handling upgrade request')
       
       // Add error handler for socket
-      socket.on('error', (err) => {
+      socket.on('error', (err: Error) => {
         log(`[WS] Socket error during upgrade: ${err}`)
       })
       
-      try {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          log('[WS] Upgrade complete, emitting connection')
-          wss.emit('connection', ws, request)
-        })
-      } catch (error) {
-        log(`[WS] handleUpgrade error: ${error}`)
-        socket.destroy()
-      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        log('[WS] Upgrade complete, emitting connection')
+        wss.emit('connection', ws, request)
+      })
     } else {
       socket.destroy()
     }
