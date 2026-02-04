@@ -352,7 +352,12 @@ async function handleTypingIndicator(
   
   if (!conversation) return
   
-  const members = JSON.parse(conversation.members) as string[]
+  // Get conversation members from conversation_member table
+  const members = await db
+    .selectFrom('conversation_member')
+    .where('conversationId', '=', conversationId)
+    .select('memberDid')
+    .execute()
   
   // Broadcast to other members
   const typingEvent: WSTypingIndicator = {
@@ -364,9 +369,9 @@ async function handleTypingIndicator(
     }
   }
   
-  members.forEach((memberDid) => {
-    if (memberDid !== userDid) {
-      sendToUser(memberDid, typingEvent)
+  members.forEach((member) => {
+    if (member.memberDid !== userDid) {
+      sendToUser(member.memberDid, typingEvent)
     }
   })
 }
@@ -383,18 +388,18 @@ async function broadcastPresence(
   const now = new Date().toISOString()
   
   await db
-    .insertInto('presence')
+    .insertInto('user_presence')
     .values({
-      userDid,
-      status,
-      lastSeen: now,
+      did: userDid,
+      isOnline: status === 'online' ? 1 : 0,
+      lastSeenAt: now,
       updatedAt: now,
     })
     .onConflict((oc) => oc
-      .column('userDid')
+      .column('did')
       .doUpdateSet({
-        status,
-        lastSeen: now,
+        isOnline: status === 'online' ? 1 : 0,
+        lastSeenAt: now,
         updatedAt: now,
       })
     )
@@ -406,19 +411,23 @@ async function broadcastPresence(
   
   // Get user's conversations to find contacts
   const conversations = await db
-    .selectFrom('conversation')
-    .where('members', 'like', `%${userDid}%`)
-    .select('members')
+    .selectFrom('conversation_member')
+    .where('memberDid', '=', userDid)
+    .select('conversationId')
     .execute()
   
-  // Collect unique contacts
+  // Collect unique contacts from all conversations
   const contacts = new Set<string>()
-  conversations.forEach((conv) => {
-    const members = JSON.parse(conv.members) as string[]
-    members.forEach((m) => {
-      if (m !== userDid) contacts.add(m)
-    })
-  })
+  for (const conv of conversations) {
+    const members = await db
+      .selectFrom('conversation_member')
+      .where('conversationId', '=', conv.conversationId)
+      .where('memberDid', '!=', userDid)
+      .select('memberDid')
+      .execute()
+    
+    members.forEach((m) => contacts.add(m.memberDid))
+  }
   
   // Broadcast presence to contacts
   const presenceEvent: WSPresenceUpdate = {
@@ -467,11 +476,16 @@ export async function sendToConversation(
   
   if (!conversation) return
   
-  const members = JSON.parse(conversation.members) as string[]
+  // Get members from conversation_member table
+  const members = await db
+    .selectFrom('conversation_member')
+    .where('conversationId', '=', conversationId)
+    .select('memberDid')
+    .execute()
   
-  members.forEach((memberDid) => {
-    if (memberDid !== excludeUserDid) {
-      sendToUser(memberDid, message)
+  members.forEach((member) => {
+    if (member.memberDid !== excludeUserDid) {
+      sendToUser(member.memberDid, message)
     }
   })
 }
