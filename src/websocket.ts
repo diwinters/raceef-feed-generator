@@ -223,9 +223,9 @@ export function setupWebSocket(
     log(`[WS] Error stack: ${error.stack}`)
   })
   
-  // Monitor the http server for upgrade events
-  server.on('upgrade', (req, socket) => {
-    log(`[WS] HTTP upgrade event for ${req.url}`)
+  // Add headers handler to debug
+  wss.on('headers', (headers, req) => {
+    log(`[WS] headers event - sending response headers`)
   })
   
   // Heartbeat check interval
