@@ -175,10 +175,11 @@ export class FeedGenerator {
   async start(): Promise<http.Server> {
     await migrateToLatest(this.db)
     this.firehose.run(this.cfg.subscriptionReconnectDelay)
-    this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
-    await events.once(this.server, 'listening')
     
-    // Set up WebSocket server on the same HTTP server with JWT verification
+    // Create HTTP server explicitly so WebSocket can attach to it
+    this.server = http.createServer(this.app)
+    
+    // Set up WebSocket server BEFORE starting to listen
     this.wss = setupWebSocket(
       this.server, 
       this.db, 
@@ -186,6 +187,10 @@ export class FeedGenerator {
       this.didResolver
     )
     log(`[Server] WebSocket server ready on ws://localhost:${this.cfg.port}/ws`)
+    
+    // Now start listening
+    this.server.listen(this.cfg.port, this.cfg.listenhost)
+    await events.once(this.server, 'listening')
     
     return this.server
   }
