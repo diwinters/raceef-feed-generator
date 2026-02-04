@@ -202,21 +202,30 @@ export function setupWebSocket(
   serviceDid: string,
   didResolver: DidResolver
 ): WebSocketServer {
+  log('[WS] Setting up WebSocket server...')
+  
   const wss = new WebSocketServer({ 
     server,
     path: '/ws',
     verifyClient: (info, callback) => {
-      log('[WS] verifyClient called')
+      log('[WS] verifyClient called for ' + info.req.url)
       // We'll do actual auth in connection handler
       callback(true)
+      log('[WS] verifyClient callback done')
     }
   })
   
-  log('[WS] WebSocket server initialized on /ws')
+  log('[WS] WebSocketServer created')
   
   // Handle errors on the server
   wss.on('error', (error) => {
     log(`[WS] WebSocket server error: ${error.message}`)
+    log(`[WS] Error stack: ${error.stack}`)
+  })
+  
+  // Monitor the http server for upgrade events
+  server.on('upgrade', (req, socket) => {
+    log(`[WS] HTTP upgrade event for ${req.url}`)
   })
   
   // Heartbeat check interval
