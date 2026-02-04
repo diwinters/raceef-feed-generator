@@ -14,6 +14,13 @@ import http from 'http'
 import { URL } from 'url'
 import { Database } from './db'
 import { log } from './logger'
+import { verifyJwt } from '@atproto/xrpc-server'
+import { DidResolver } from '@atproto/identity'
+
+// Rate limiting for failed auth attempts
+const authFailures = new Map<string, { count: number; lastAttempt: number }>()
+const MAX_AUTH_FAILURES = 5
+const AUTH_FAILURE_WINDOW = 60000 // 1 minute
 
 // Connection registry: maps userDid -> Set of WebSocket connections
 // (user can have multiple connections from different devices)
@@ -99,41 +106,88 @@ export interface WSReaction {
  * Authenticate WebSocket connection from URL query params
  * Expects: ws://host/ws?token=JWT&did=user_did
  */
-function authenticateConnection(req: http.IncomingMessage, db: Database): string | null {
+async function authenticateConnection(
+  req: http.IncomingMessage, 
+  db: Database,
+  serviceDid: string,
+  didResolver: DidResolver
+): Promise<string | null> {
   try {
     const url = new URL(req.url || '', `http://${req.headers.host}`)
     const token = url.searchParams.get('token')
     const did = url.searchParams.get('did')
+    const ip = req.socket.remoteAddress || 'unknown'
     
     if (!token || !did) {
       log('[WS] Missing token or did in connection request')
       return null
     }
     
-    // For now, trust the DID if token matches a simple check
-    // In production, verify JWT signature against user's signing key
-    // The token should be the same format used in REST API auth
+    // Check rate limiting for failed auth attempts
+    const failures = authFailures.get(ip)
+    if (failures && failures.count >= MAX_AUTH_FAILURES) {
+      const elapsed = Date.now() - failures.lastAttempt
+      if (elapsed < AUTH_FAILURE_WINDOW) {
+        log(`[WS] Rate limited: ${ip} has ${failures.count} failed attempts`)
+        return null
+      } else {
+        // Reset after window expires
+        authFailures.delete(ip)
+      }
+    }
     
-    // Basic validation: token should be base64-ish and did should be valid format
+    // Basic validation: did should be valid format
     if (!did.startsWith('did:')) {
       log('[WS] Invalid DID format')
+      recordAuthFailure(ip)
       return null
     }
     
-    // TODO: Add proper JWT verification
-    // For now, we trust authenticated clients (they already passed REST API auth)
-    log(`[WS] Authenticated connection for ${did}`)
-    return did
+    // Verify JWT signature using AT Protocol's verifyJwt
+    try {
+      const parsed = await verifyJwt(token, serviceDid, null, async (issuerDid: string) => {
+        return didResolver.resolveAtprotoKey(issuerDid)
+      })
+      
+      // Verify the JWT issuer matches the claimed DID
+      if (parsed.iss !== did) {
+        log(`[WS] JWT issuer ${parsed.iss} does not match claimed DID ${did}`)
+        recordAuthFailure(ip)
+        return null
+      }
+      
+      log(`[WS] JWT verified for ${did}`)
+      return did
+    } catch (jwtError) {
+      log(`[WS] JWT verification failed: ${jwtError}`)
+      recordAuthFailure(ip)
+      return null
+    }
   } catch (error) {
     log(`[WS] Auth error: ${error}`)
     return null
   }
 }
 
+function recordAuthFailure(ip: string) {
+  const existing = authFailures.get(ip)
+  if (existing) {
+    existing.count++
+    existing.lastAttempt = Date.now()
+  } else {
+    authFailures.set(ip, { count: 1, lastAttempt: Date.now() })
+  }
+}
+
 /**
  * Set up WebSocket server on existing HTTP server
  */
-export function setupWebSocket(server: http.Server, db: Database): WebSocketServer {
+export function setupWebSocket(
+  server: http.Server, 
+  db: Database,
+  serviceDid: string,
+  didResolver: DidResolver
+): WebSocketServer {
   const wss = new WebSocketServer({ 
     server,
     path: '/ws'
@@ -169,9 +223,9 @@ export function setupWebSocket(server: http.Server, db: Database): WebSocketServ
     clearInterval(heartbeatInterval)
   })
   
-  wss.on('connection', (ws, req) => {
-    // Authenticate
-    const userDid = authenticateConnection(req, db)
+  wss.on('connection', async (ws, req) => {
+    // Authenticate (now async with proper JWT verification)
+    const userDid = await authenticateConnection(req, db, serviceDid, didResolver)
     if (!userDid) {
       ws.close(4001, 'Unauthorized')
       return

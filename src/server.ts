@@ -25,6 +25,7 @@ export class FeedGenerator {
   public db: Database
   public firehose: FirehoseSubscription
   public cfg: Config
+  public didResolver: DidResolver
   private startTime: Date
 
   constructor(
@@ -32,11 +33,13 @@ export class FeedGenerator {
     db: Database,
     firehose: FirehoseSubscription,
     cfg: Config,
+    didResolver: DidResolver,
   ) {
     this.app = app
     this.db = db
     this.firehose = firehose
     this.cfg = cfg
+    this.didResolver = didResolver
     this.startTime = new Date()
   }
 
@@ -166,7 +169,7 @@ export class FeedGenerator {
       res.status(500).json({error: 'Internal server error'})
     })
 
-    return new FeedGenerator(app, db, firehose, cfg)
+    return new FeedGenerator(app, db, firehose, cfg, didResolver)
   }
 
   async start(): Promise<http.Server> {
@@ -175,8 +178,13 @@ export class FeedGenerator {
     this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
     await events.once(this.server, 'listening')
     
-    // Set up WebSocket server on the same HTTP server
-    this.wss = setupWebSocket(this.server, this.db)
+    // Set up WebSocket server on the same HTTP server with JWT verification
+    this.wss = setupWebSocket(
+      this.server, 
+      this.db, 
+      this.cfg.serviceDid,
+      this.didResolver
+    )
     log(`[Server] WebSocket server ready on ws://localhost:${this.cfg.port}/ws`)
     
     return this.server
