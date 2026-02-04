@@ -214,9 +214,21 @@ export function setupWebSocket(
     
     if (pathname === '/ws') {
       log('[WS] Handling upgrade request')
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request)
+      
+      // Add error handler for socket
+      socket.on('error', (err) => {
+        log(`[WS] Socket error during upgrade: ${err}`)
       })
+      
+      try {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          log('[WS] Upgrade complete, emitting connection')
+          wss.emit('connection', ws, request)
+        })
+      } catch (error) {
+        log(`[WS] handleUpgrade error: ${error}`)
+        socket.destroy()
+      }
     } else {
       socket.destroy()
     }
