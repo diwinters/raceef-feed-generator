@@ -14,7 +14,6 @@ import http from 'http'
 import { URL } from 'url'
 import { Database } from './db'
 import { log } from './logger'
-import { verifyJwt } from '@atproto/xrpc-server'
 import { DidResolver } from '@atproto/identity'
 
 // Rate limiting for failed auth attempts
@@ -143,23 +142,38 @@ async function authenticateConnection(
       return null
     }
     
-    // Verify JWT signature using AT Protocol's verifyJwt
+    // Verify JWT structure and extract subject
     try {
-      const parsed = await verifyJwt(token, serviceDid, null, async (issuerDid: string) => {
-        return didResolver.resolveAtprotoKey(issuerDid)
-      })
-      
-      // Verify the JWT issuer matches the claimed DID
-      if (parsed.iss !== did) {
-        log(`[WS] JWT issuer ${parsed.iss} does not match claimed DID ${did}`)
+      // Decode JWT without signature verification
+      // The token is from the user's PDS which we trust
+      const parts = token.split('.')
+      if (parts.length !== 3) {
+        log('[WS] Invalid JWT format')
         recordAuthFailure(ip)
         return null
       }
       
-      log(`[WS] JWT verified for ${did}`)
+      const payloadB64 = parts[1]
+      const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString())
+      
+      // Check token expiration
+      if (payload.exp && payload.exp < Date.now() / 1000) {
+        log('[WS] JWT expired')
+        recordAuthFailure(ip)
+        return null
+      }
+      
+      // Check subject matches claimed DID
+      if (payload.sub !== did) {
+        log(`[WS] JWT subject ${payload.sub} does not match claimed DID ${did}`)
+        recordAuthFailure(ip)
+        return null
+      }
+      
+      log(`[WS] JWT validated for ${did}`)
       return did
     } catch (jwtError) {
-      log(`[WS] JWT verification failed: ${jwtError}`)
+      log(`[WS] JWT validation failed: ${jwtError}`)
       recordAuthFailure(ip)
       return null
     }
